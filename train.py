@@ -20,6 +20,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
 from tensorflow.keras import callbacks, layers, models, optimizers
+from tensorflow.keras.applications import MobileNetV2
 
 DATA_DIR = Path("data/merged")
 FIG_DIR = Path("figures")
@@ -29,6 +30,7 @@ BATCH_SIZE = 16
 SEED = 42
 EPOCHS_BASE = 10
 EPOCHS_AUG = 25
+EPOCHS_TL = 12
 
 # pothole is 0 and plain is 1, so the sigmoid output is P(plain)
 CLASSES = ["pothole", "plain"]
@@ -192,6 +194,24 @@ def build_augmented_cnn():
     ])
 
 
+def build_transfer():
+    base = MobileNetV2(input_shape=(IMG_SIZE, IMG_SIZE, 3), include_top=False, weights="imagenet")
+    # around 1k images isn't enough to retrain 2.3M params without wrecking the imagenet features
+    base.trainable = False
+
+    inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3))
+    x = build_augment()(inputs)
+    # mobilenetv2 was trained on pixels in [-1, 1], ours are in [0, 1]
+    x = layers.Rescaling(2.0, offset=-1.0)(x)
+    x = base(x, training=False)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dropout(0.3)(x)
+    x = layers.Dense(64, activation="relu")(x)
+    x = layers.Dropout(0.3)(x)
+    outputs = layers.Dense(1, activation="sigmoid")(x)
+    return models.Model(inputs, outputs)
+
+
 def class_weights(y):
     n_pothole, n_plain = np.bincount(y)
     # the full imbalance ratio made training unstable, so sqrt is a softer push toward plain
@@ -235,6 +255,17 @@ def main():
     plot_curves(history, "CNN + Augmentation", "aug_curves.png")
     result = evaluate(model, X_test, y_test, "CNN + Augmentation")
     plot_confusion(y_test, result, "aug_confusion.png")
+
+    print("\n=== mobilenetv2 transfer ===")
+    model = build_transfer()
+    model.compile(optimizer=optimizers.Adam(1e-3), loss="binary_crossentropy", metrics=["accuracy"])
+    early_stop = callbacks.EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True)
+    history = model.fit(X_train, y_train, epochs=EPOCHS_TL, batch_size=BATCH_SIZE,
+                        validation_split=0.2, class_weight=weights,
+                        callbacks=[early_stop], verbose=2)
+    plot_curves(history, "MobileNetV2 Transfer", "mobilenetv2_curves.png")
+    result = evaluate(model, X_test, y_test, "MobileNetV2 Transfer")
+    plot_confusion(y_test, result, "mobilenetv2_confusion.png")
 
 
 if __name__ == "__main__":
