@@ -1,0 +1,17 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# datasets are downloaded separately, see README
+data/
+
+# trained models
+*.keras
+*.h5
+
+# os junk
+.DS_Store
+Thumbs.db
