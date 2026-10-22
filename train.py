@@ -19,7 +19,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
-from tensorflow.keras import layers, models
+from tensorflow.keras import callbacks, layers, models, optimizers
 
 DATA_DIR = Path("data/merged")
 FIG_DIR = Path("figures")
@@ -28,6 +28,7 @@ IMG_SIZE = 128
 BATCH_SIZE = 16
 SEED = 42
 EPOCHS_BASE = 10
+EPOCHS_AUG = 25
 
 # pothole is 0 and plain is 1, so the sigmoid output is P(plain)
 CLASSES = ["pothole", "plain"]
@@ -84,6 +85,22 @@ def plot_class_balance(y):
     ax.spines[["top", "right"]].set_visible(False)
     plt.tight_layout()
     plt.savefig(FIG_DIR / "class_balance.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def plot_augmentation(augment, image):
+    fig, axes = plt.subplots(1, 6, figsize=(15, 3))
+    axes[0].imshow(image)
+    axes[0].set_title("Original")
+    for i in range(1, 6):
+        out = augment(image[None], training=True)[0].numpy()
+        axes[i].imshow(np.clip(out, 0, 1))
+        axes[i].set_title(f"Aug {i}")
+    for ax in axes:
+        ax.axis("off")
+    fig.suptitle("Augmentation Examples", fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(FIG_DIR / "augmentation_examples.png", dpi=150, bbox_inches="tight")
     plt.close()
 
 
@@ -148,6 +165,39 @@ def build_baseline():
     ])
 
 
+def build_augment():
+    return models.Sequential([
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.10),
+        layers.RandomZoom(0.10),
+    ], name="augment")
+
+
+def build_augmented_cnn():
+    return models.Sequential([
+        layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
+        # random layers are no-ops at predict time, so test images go through untouched
+        build_augment(),
+        layers.Conv2D(32, 3, activation="relu", padding="same"),
+        layers.MaxPooling2D(2),
+        layers.Conv2D(64, 3, activation="relu", padding="same"),
+        layers.MaxPooling2D(2),
+        layers.Conv2D(128, 3, activation="relu", padding="same"),
+        layers.MaxPooling2D(2),
+        # pooling instead of flatten drops the params from about 4.3M to about 100k, the baseline overfit
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(64, activation="relu"),
+        layers.Dropout(0.4),
+        layers.Dense(1, activation="sigmoid"),
+    ])
+
+
+def class_weights(y):
+    n_pothole, n_plain = np.bincount(y)
+    # the full imbalance ratio made training unstable, so sqrt is a softer push toward plain
+    return {0: 1.0, 1: float(np.sqrt(n_pothole / n_plain))}
+
+
 def main():
     tf.keras.utils.set_random_seed(SEED)
     FIG_DIR.mkdir(exist_ok=True)
@@ -170,6 +220,21 @@ def main():
     plot_curves(history, "Baseline CNN", "baseline_curves.png")
     result = evaluate(model, X_test, y_test, "Baseline CNN")
     plot_confusion(y_test, result, "baseline_confusion.png")
+
+    weights = class_weights(y_train)
+    print(f"class weights: {weights}")
+    plot_augmentation(build_augment(), X_train[0])
+
+    print("\n=== cnn + augmentation ===")
+    model = build_augmented_cnn()
+    model.compile(optimizer=optimizers.Adam(5e-4), loss="binary_crossentropy", metrics=["accuracy"])
+    early_stop = callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True)
+    history = model.fit(X_train, y_train, epochs=EPOCHS_AUG, batch_size=BATCH_SIZE,
+                        validation_split=0.2, class_weight=weights,
+                        callbacks=[early_stop], verbose=2)
+    plot_curves(history, "CNN + Augmentation", "aug_curves.png")
+    result = evaluate(model, X_test, y_test, "CNN + Augmentation")
+    plot_confusion(y_test, result, "aug_confusion.png")
 
 
 if __name__ == "__main__":
