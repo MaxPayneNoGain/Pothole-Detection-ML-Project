@@ -1,8 +1,9 @@
 """
 Trains a pothole vs plain road classifier on the merged dataset and saves
-plots to figures/. Run prepare_data.py first.
+plots and metrics to figures/. Run prepare_data.py first.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -131,11 +132,68 @@ def plot_confusion(y_true, result, fname):
     plt.close()
 
 
+def plot_comparison(results):
+    metrics = ["accuracy", "precision", "recall", "f1"]
+    colors = ["#E53935", "#FB8C00", "#1E88E5"]
+    x = np.arange(len(metrics))
+    w = 0.8 / len(results)
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for i, (result, color) in enumerate(zip(results, colors)):
+        vals = [result[m] for m in metrics]
+        pos = x + (i - (len(results) - 1) / 2) * w
+        ax.bar(pos, vals, w, label=result["name"], color=color)
+        for px, v in zip(pos, vals):
+            ax.text(px, v + 0.01, f"{v:.2f}", ha="center", fontsize=8)
+    ax.set_xticks(x, [m.title() for m in metrics])
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Score")
+    ax.set_title("Model Comparison - Test Set", fontsize=14, fontweight="bold")
+    ax.legend(loc="lower left")
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(FIG_DIR / "model_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def plot_misclassified(X, y, result):
+    wrong = np.flatnonzero(result["preds"] != y)[:8]
+    fig, axes = plt.subplots(2, 4, figsize=(13, 6))
+    fig.suptitle(f"Misclassified - {result['name']}", fontsize=14, fontweight="bold")
+    for ax, i in zip(axes.flat, wrong):
+        pred = result["preds"][i]
+        conf = result["probs"][i] if pred == 1 else 1 - result["probs"][i]
+        ax.imshow(X[i])
+        ax.set_title(f"True: {LABEL_NAMES[y[i]]}\nPred: {LABEL_NAMES[pred]} ({conf:.2f})", fontsize=9)
+    for ax in axes.flat:
+        ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(FIG_DIR / "misclassified.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def save_metrics(results, best, y_train, y_test, weights):
+    counts = np.bincount(np.concatenate([y_train, y_test]))
+    summary = {
+        "dataset": {
+            "pothole": int(counts[0]),
+            "plain": int(counts[1]),
+            "train": len(y_train),
+            "test": len(y_test),
+            "class_weights": weights,
+        },
+        "models": [{k: v for k, v in r.items() if k not in ("probs", "preds")} for r in results],
+        "best_model": best["name"],
+    }
+    with open(FIG_DIR / "metrics.json", "w") as f:
+        json.dump(summary, f, indent=2)
+
+
 def evaluate(model, X, y, name):
     probs = model.predict(X, batch_size=BATCH_SIZE, verbose=0).flatten()
     preds = (probs > 0.5).astype(int)
     # headline precision/recall/f1 are for potholes, the class we actually need to catch
-    p, r, f1, _ = precision_recall_fscore_support(y, preds, average="binary", pos_label=0)
+    p, r, f1, _ = precision_recall_fscore_support(y, preds, average="binary", pos_label=0,
+                                                  zero_division=0)
     result = {
         "name": name,
         "accuracy": float((preds == y).mean()),
@@ -147,7 +205,7 @@ def evaluate(model, X, y, name):
         "preds": preds,
     }
     print(f"\n[{name}] acc={result['accuracy']:.4f} f1={f1:.4f} auc={result['auc']:.4f}")
-    print(classification_report(y, preds, target_names=LABEL_NAMES))
+    print(classification_report(y, preds, target_names=LABEL_NAMES, zero_division=0))
     return result
 
 
@@ -231,6 +289,7 @@ def main():
         X, y, test_size=0.2, random_state=SEED, stratify=y
     )
     print(f"train: {len(y_train)} | test: {len(y_test)}")
+    results = []
 
     print("\n=== baseline cnn ===")
     model = build_baseline()
@@ -240,6 +299,7 @@ def main():
     plot_curves(history, "Baseline CNN", "baseline_curves.png")
     result = evaluate(model, X_test, y_test, "Baseline CNN")
     plot_confusion(y_test, result, "baseline_confusion.png")
+    results.append(result)
 
     weights = class_weights(y_train)
     print(f"class weights: {weights}")
@@ -255,6 +315,7 @@ def main():
     plot_curves(history, "CNN + Augmentation", "aug_curves.png")
     result = evaluate(model, X_test, y_test, "CNN + Augmentation")
     plot_confusion(y_test, result, "aug_confusion.png")
+    results.append(result)
 
     print("\n=== mobilenetv2 transfer ===")
     model = build_transfer()
@@ -266,6 +327,17 @@ def main():
     plot_curves(history, "MobileNetV2 Transfer", "mobilenetv2_curves.png")
     result = evaluate(model, X_test, y_test, "MobileNetV2 Transfer")
     plot_confusion(y_test, result, "mobilenetv2_confusion.png")
+    results.append(result)
+
+    plot_comparison(results)
+    best = max(results, key=lambda r: r["f1"])
+    plot_misclassified(X_test, y_test, best)
+    save_metrics(results, best, y_train, y_test, weights)
+
+    print()
+    for r in results:
+        print(f"{r['name']:22s} acc={r['accuracy']:.4f} f1={r['f1']:.4f} auc={r['auc']:.4f}")
+    print(f"best by f1: {best['name']}")
 
 
 if __name__ == "__main__":
